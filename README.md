@@ -145,6 +145,7 @@ install.packages(c(
 ## Author
 
 Vera Gak Anagrova
+
 MSc Data Science & Marketing Analytics
 Erasmus School of Economics
 Erasmus University Rotterdam
