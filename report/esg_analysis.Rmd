@@ -1,0 +1,1175 @@
+---
+title: "Understanding Corporate Sustainability using Machine Learning"
+subtitle: "EBB3 – Team 2 | Erasmus School of Economics"
+author: "Vera Gak Anagrova"
+date: "3 January, 2026"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: true
+    toc_depth: 2
+    number_sections: true
+geometry: margin=1.95 cm
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{makecell}
+  - \usepackage{sectsty}
+  - \sectionfont{\large}
+  - \subsectionfont{\normalsize}
+  - \usepackage{caption}
+  - \captionsetup{font={small},labelfont=bf,textfont=bf}
+editor_options:
+  chunk_output_type: inline
+  markdown: 
+    wrap: 72
+urlcolor: blue
+linkcolor: red
+always_allow_html: true
+bibliography: references.bib
+nocite: '@*'
+
+---
+
+```{r, include = FALSE, warning=FALSE, error=FALSE}
+
+############################################################
+# Load Libraries
+############################################################
+library(tidyverse)
+library(ggplot2)
+library(ggrepel)
+library(patchwork)
+library(caret)
+library(knitr)
+library(kableExtra)
+library(rpart)
+#install.packages("rpart.plot")
+library(rpart.plot)
+library(randomForest)
+library(pdp)
+library(dplyr)
+#install.packages("lime")
+library(lime)
+library(scales)
+
+############################################################
+# Import Data
+############################################################
+df <- read.csv("company_esg_financial_dataset.csv")
+
+# Data overview
+str(df)
+summary(df)
+
+############################################################
+# Basic Cleaning
+############################################################
+
+# Drop identifiers
+df <- df %>% 
+  select(-CompanyID, -CompanyName)
+
+# Convert categorical variables to factors
+df <- df %>%
+  mutate(
+    Industry = as.factor(Industry),
+    Region   = as.factor(Region),
+    Year     = as.factor(Year)
+  )
+
+############################################################
+# Handle Missing Values
+############################################################
+
+sum(is.na(df$GrowthRate))
+
+# Replace missing GrowthRate values with median
+df$GrowthRate[is.na(df$GrowthRate)] <- median(df$GrowthRate, na.rm = TRUE)
+
+############################################################
+# Exploratory Data Analysis
+############################################################
+
+# Visualize distributions of numeric variables
+num_vars <- df %>% select(where(is.numeric))
+
+par(mfrow = c(3,4))
+for (v in names(num_vars)) {
+  hist(num_vars[[v]],
+       main = v,
+       xlab = "",
+       breaks = 30)
+}
+par(mfrow = c(1,1))
+
+############################################################
+# Feature Engineering
+############################################################
+
+# Log-transform highly skewed variables
+df <- df %>%
+  mutate(
+    log_MarketCap         = log1p(MarketCap),
+    log_CarbonEmissions   = log1p(CarbonEmissions),
+    log_WaterUsage        = log1p(WaterUsage),
+    log_EnergyConsumption = log1p(EnergyConsumption)
+  )
+
+# Create ESG classification target
+df <- df %>%
+  mutate(
+    ESG_Class = ifelse(
+      ESG_Overall > median(ESG_Overall, na.rm = TRUE),
+      "High",
+      "Low"
+    ),
+    ESG_Class = as.factor(ESG_Class)
+  )
+
+############################################################
+# Data for Clustering
+############################################################
+
+env_vars <- df %>%
+  select(
+    ESG_Environmental,
+    log_CarbonEmissions,
+    log_WaterUsage,
+    log_EnergyConsumption
+  )
+
+env_scaled <- scale(env_vars)
+
+############################################################
+# Data for Supervised Models
+############################################################
+
+model_data <- df %>%
+  select(
+    ESG_Class,
+    Revenue,
+    ProfitMargin,
+    GrowthRate,
+    log_MarketCap,
+    Industry,
+    Region,
+    Year,
+    log_CarbonEmissions,
+    log_WaterUsage,
+    log_EnergyConsumption
+  )
+
+############################################################
+# Train/Test Split
+############################################################
+
+set.seed(123)
+
+train_index <- sample(
+  seq_len(nrow(model_data)),
+  size = 0.7 * nrow(model_data)
+)
+
+train_data <- model_data[train_index, ]
+test_data  <- model_data[-train_index, ]
+
+############################################################
+# Hierarchical Clustering
+############################################################
+
+# Distance matrix (Euclidean)
+dist_env <- dist(env_scaled, method = "euclidean")
+
+hc_env <- hclust(dist_env, method = "ward.D2")
+
+plot(
+  hc_env,
+  labels = FALSE,
+  main = "Hierarchical Clustering Dendrogram",
+  xlab = "",
+  ylab = "Height"
+)
+
+# Cut dendrogram into 3 clusters
+cluster_labels <- cutree(hc_env, k = 3)
+
+# Add cluster labels to main data
+df$Cluster <- as.factor(cluster_labels)
+
+table(df$Cluster)
+
+# Cluster Profiles
+df %>%
+  group_by(Cluster) %>%
+  summarise(
+    `Carbon Emissions`        = mean(CarbonEmissions, na.rm = TRUE),
+    `Water Usage`             = mean(WaterUsage, na.rm = TRUE),
+    `Energy Consumption`      = mean(EnergyConsumption, na.rm = TRUE),
+    `Environmental ESG Score` = mean(ESG_Environmental, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 1,
+    align = c("l", "r", "r", "r", "r"),
+    caption = "\\textbf{Environmental Sustainability Cluster Profiles}"
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position = "center",
+    latex_options = c("hold_position")
+  ) 
+
+# Label clusters
+df$Cluster_label <- factor(
+  df$Cluster,
+  levels = c("1", "2", "3"),
+  labels = c("Sustainable", "Moderate impact", "High impact")
+)
+
+
+# Common color scale
+cluster_colors <- c(
+  "Sustainable"     = "forestgreen",
+  "Moderate impact" = "orange",
+  "High impact"     = "black"
+)
+
+# Small text setting
+small_text <- theme(
+  plot.title   = element_text(size = 9),
+  axis.title   = element_text(size = 7),
+  axis.text    = element_text(size = 7),
+  legend.title = element_text(size = 8),
+  legend.text  = element_text(size = 7)
+)
+
+# Plot 1: raw observations
+plot_1 <- ggplot(df, aes(
+    x = log_WaterUsage,
+    y = log_CarbonEmissions,
+    color = Cluster_label )
+) +
+  geom_point(alpha = 0.2, size = 0.6) +
+  scale_color_manual(
+    name   = "Cluster",
+    values = cluster_colors
+  ) +
+  labs(title = "Figure 1: Environmental Sustainability Clusters",
+       x = "Log Water Usage",
+       y = "Log Carbon Emissions") +
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) + theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))+
+  small_text
+
+
+# Cluster averages (for plot_2)
+cluster_summary <- df %>%
+  group_by(Cluster_label) %>%
+  summarise(
+    log_water  = mean(log_WaterUsage, na.rm = TRUE),
+    log_carbon = mean(log_CarbonEmissions, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Plot 2: cluster averages 
+plot_2 <- ggplot(cluster_summary, aes(
+    x = log_water,
+    y = log_carbon,
+    color = Cluster_label
+  )
+) +
+  geom_point(size = 6) +
+  scale_color_manual(
+    values = cluster_colors,
+    guide  = "none"   
+  ) +
+  coord_cartesian(
+    xlim = range(cluster_summary$log_water) + c(-0.3, 0.3),
+    ylim = range(cluster_summary$log_carbon) + c(-0.3, 0.3)
+  ) +
+  labs(title = "Figure 2: Average Environmental Clusters",
+       x = "Average Water Usage",
+       y = "Average Carbon Emissions") +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold"))+
+  small_text
+
+# Combine plots
+final_plot <- (plot_1 | plot_2) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+final_plot
+
+
+############################################################
+# Logistic Regression (Baseline Model)
+############################################################
+
+logit_model <- glm(
+  ESG_Class ~ Revenue + ProfitMargin + GrowthRate +
+    log_MarketCap + Industry + Region + Year +
+    log_CarbonEmissions + log_WaterUsage + log_EnergyConsumption,
+  data = train_data,
+  family = binomial
+)
+
+summary(logit_model)
+
+# predict on test data
+logit_pred_prob <- predict(
+  logit_model,
+  newdata = test_data,
+  type = "response"
+)
+
+logit_pred_class <- ifelse(logit_pred_prob > 0.5, "High", "Low")
+logit_pred_class <- as.factor(logit_pred_class)
+
+# Evaluate Performance
+
+# confusion matrix
+cm_logit <- confusionMatrix(
+  logit_pred_class,
+  test_data$ESG_Class,
+  positive = "High"
+)
+print(cm_logit)
+
+# Visualize Confusion Matrix
+cm_df <- as.data.frame(cm_logit$table)
+colnames(cm_df) <- c("Predicted", "Actual", "Count")
+
+# Heatmap
+ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 5) +
+  scale_fill_gradient(
+    low = "lightblue",
+    high = "darkseagreen3"
+  ) +
+  labs(
+    title = "Confusion Matrix Heatmap – Logistic Regression",
+    x = "Actual ESG Class",
+    y = "Predicted ESG Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 9),
+    axis.title = element_text(size = 10),
+    axis.text  = element_text(size = 9)
+  )
+
+#Train predictions
+logit_train_prob <- predict(
+  logit_model,
+  newdata = train_data,
+  type = "response"
+)
+
+logit_train_class <- ifelse(logit_train_prob > 0.5, "High", "Low") %>%
+  as.factor()
+
+# Confusion Matrix for train data
+cm_train <- confusionMatrix(
+  logit_train_class,
+  train_data$ESG_Class,
+  positive = "High"
+)
+
+#Test predictions
+logit_test_prob <- predict(
+  logit_model,
+  newdata = test_data,
+  type = "response"
+)
+
+logit_test_class <- ifelse(logit_test_prob > 0.5, "High", "Low") %>%
+  as.factor()
+
+# Confusion Matrix for test data
+cm_test <- confusionMatrix(
+  logit_test_class,
+  test_data$ESG_Class,
+  positive = "High"
+)
+
+# Heatmap
+ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 5) +
+  scale_fill_gradient(
+    low = "lightblue",
+    high = "darkseagreen3"
+  ) +
+  labs(
+    title = "Confusion Matrix Heatmap – Logistic Regression",
+    x = "Actual ESG Class",
+    y = "Predicted ESG Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 9),
+    axis.title = element_text(size = 10),
+    axis.text  = element_text(size = 9)
+  )
+
+
+# Summary statistics
+stats_logit <- data.frame(
+  `Train Accuracy`      = cm_train$overall["Accuracy"],
+  `Test Accuracy`       = cm_test$overall["Accuracy"],
+  Kappa               = cm_test$overall["Kappa"],
+  Sensitivity         = cm_test$byClass["Sensitivity"],
+  Specificity         = cm_test$byClass["Specificity"],
+  `Balanced Accuracy`   = cm_test$byClass["Balanced Accuracy"],
+  row.names = NULL
+)
+
+# Table for logistic regression 
+kable(stats_logit, digits = 3,
+      caption = "\\textbf{Performance Metrics for Logistic Regression}")%>%
+  kable_styling(full_width = FALSE, position = "center")
+
+
+############################################################
+# Decision Tree
+############################################################
+
+tree_model <- rpart(
+  ESG_Class ~ Revenue + ProfitMargin + GrowthRate +
+    log_MarketCap + Industry + Region + Year +
+    log_CarbonEmissions + log_WaterUsage + log_EnergyConsumption,
+  data = train_data,
+  method = "class",
+  control = rpart.control(
+    cp = 0.01,        # complexity parameter (prevents overfitting)
+    minsplit = 20,    # minimum obs to split
+    maxdepth = 6      # keeps tree interpretable
+  )
+)
+
+# Visualize Tree
+rpart.plot(
+  tree_model,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  main = "Figure 3: Decision Tree for ESG Classification",
+  cex.main = 1.15,   
+  split.cex = 0.9)
+
+
+# Train predictions
+tree_train_class <- predict(
+  tree_model,
+  newdata = train_data,
+  type = "class"
+)
+
+cm_tree_train <- confusionMatrix(
+  tree_train_class,
+  train_data$ESG_Class,
+  positive = "High"
+)
+
+# Test predictions
+tree_test_class <- predict(
+  tree_model,
+  newdata = test_data,
+  type = "class"
+)
+
+cm_tree_test <- confusionMatrix(
+  tree_test_class,
+  test_data$ESG_Class,
+  positive = "High"
+)
+
+# Visualize Confusion Matrix
+cm_df_tree <- as.data.frame(cm_tree_test$table)
+colnames(cm_df_tree) <- c("Predicted", "Actual", "Count")
+
+# Heatmap
+ggplot(cm_df_tree, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 5) +
+  scale_fill_gradient(
+    low = "lightblue",
+    high = "darkseagreen3"
+  ) +
+  labs(
+    title = "Confusion Matrix Heatmap – Decision Tree",
+    x = "Actual ESG Class",
+    y = "Predicted ESG Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 12),
+    axis.title = element_text(size = 10),
+    axis.text  = element_text(size = 9)
+  )
+
+# Summary statistics
+stats_tree <- data.frame(
+  `Train Accuracy`    = as.numeric(cm_tree_train$overall["Accuracy"]),
+  `Test Accuracy`     = as.numeric(cm_tree_test$overall["Accuracy"]),
+  Kappa             = as.numeric(cm_tree_test$overall["Kappa"]),
+  Sensitivity       = as.numeric(cm_tree_test$byClass["Sensitivity"]),
+  Specificity       = as.numeric(cm_tree_test$byClass["Specificity"]),
+  `Balanced Accuracy` = as.numeric(cm_tree_test$byClass["Balanced Accuracy"])
+)
+
+# Table for decision tree
+kable(stats_tree, digits = 3,
+      caption = "\\textbf{Performance Metrics for Descision Tree}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+
+############################################################
+# Random Forest
+############################################################
+
+set.seed(123)
+
+rf_model <- randomForest(
+  ESG_Class ~ Revenue + ProfitMargin + GrowthRate +
+    log_MarketCap + Industry + Region + Year +
+    log_CarbonEmissions + log_WaterUsage + log_EnergyConsumption,
+  data = train_data,
+  ntree = 500,          # enough trees for stability
+  mtry  = 3,            # default-ish for classification
+  importance = TRUE
+)
+
+rf_model$err.rate[rf_model$ntree, "OOB"]
+
+# Train predictions
+rf_train_class <- predict(
+  rf_model,
+  newdata = train_data,
+  type = "class"
+)
+
+cm_rf_train <- confusionMatrix(
+  rf_train_class,
+  train_data$ESG_Class,
+  positive = "High"
+)
+
+# Test predictions
+rf_test_class <- predict(
+  rf_model,
+  newdata = test_data,
+  type = "class"
+)
+
+cm_rf_test <- confusionMatrix(
+  rf_test_class,
+  test_data$ESG_Class,
+  positive = "High"
+)
+
+# Visualize Confusion Matrix
+cm_df_rf <- as.data.frame(cm_rf_test$table)
+colnames(cm_df_rf) <- c("Predicted", "Actual", "Count")
+
+# Heatmap
+p_rf <- ggplot(cm_df_rf, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 5) +
+  scale_fill_gradient(
+    low = "lightblue",
+    high = "darkseagreen3"
+  ) +
+  labs(
+    title = "Figure 4: Confusion Matrix – Random Forest",
+    x = "Actual ESG Class",
+    y = "Predicted ESG Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 9, face = "bold"),
+    axis.title = element_text(size = 8),
+    axis.text  = element_text(size = 6)
+  )
+
+# Performance Metrics
+stats_rf <- data.frame(
+  'Train Accuracy'    = as.numeric(cm_rf_train$overall["Accuracy"]),
+  'Test Accuracy'     = as.numeric(cm_rf_test$overall["Accuracy"]),
+  Kappa             = as.numeric(cm_rf_test$overall["Kappa"]),
+  Sensitivity       = as.numeric(cm_rf_test$byClass["Sensitivity"]),
+  Specificity       = as.numeric(cm_rf_test$byClass["Specificity"]),
+  'Balanced Accuracy' = as.numeric(cm_rf_test$byClass["Balanced Accuracy"])
+)
+
+# Table for random forest
+kable(stats_rf, digits = 3,
+      caption = "\\textbf{Performance Metrics for Random Forest}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+
+
+############################################################
+# Random Forest Tuned
+############################################################
+
+set.seed(123)
+
+# X = predictors only, y = target factor
+x_train <- train_data %>% select(-ESG_Class)
+y_train <- train_data$ESG_Class
+
+# Tune mtry using OOB error
+rf_tune <- tuneRF(
+  x = x_train,
+  y = y_train,
+  mtryStart = floor(sqrt(ncol(x_train))),  # sensible start
+  stepFactor = 1.5,
+  improve = 0.01,     # stop if improvement < 1%
+  ntreeTry = 300,
+  trace = TRUE,
+  plot = TRUE
+)
+
+rf_tune
+best_mtry <- rf_tune[which.min(rf_tune[, "OOBError"]), "mtry"]
+best_mtry
+
+# Fit final tuned Random Forest
+set.seed(123)
+rf_model_tuned <- randomForest(
+  ESG_Class ~ .,
+  data = train_data,
+  ntree = 500,
+  mtry = best_mtry,
+  importance = TRUE
+)
+
+# Train
+rf_tuned_train_class <- predict(rf_model_tuned, newdata = train_data, type = "class")
+cm_rf_tuned_train <- confusionMatrix(rf_tuned_train_class, train_data$ESG_Class, positive = "High")
+
+# Test
+rf_tuned_test_class <- predict(rf_model_tuned, newdata = test_data, type = "class")
+cm_rf_tuned_test <- confusionMatrix(rf_tuned_test_class, test_data$ESG_Class, positive = "High")
+
+cm_rf_tuned_test
+
+
+cm_df_rf_tuned <- as.data.frame(cm_rf_tuned_test$table)
+colnames(cm_df_rf_tuned) <- c("Predicted", "Actual", "Count")
+
+p_rf_tuned <- ggplot(cm_df_rf_tuned, aes(x = Actual, y = Predicted, fill = Count)) +
+  geom_tile(color = "white") +
+  geom_text(aes(label = Count), size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "darkseagreen3") +
+  labs(
+    title = "Figure 5: Confusion Matrix – Random Forest (Tuned)",
+    x = "Actual ESG Class",
+    y = "Predicted ESG Class"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, size = 9, face = "bold"),
+    axis.title = element_text(size = 8),
+    axis.text  = element_text(size = 6)
+  )
+
+
+# Performance Metrics
+stats_rf_tuned <- data.frame(
+  'Train Accuracy'    = as.numeric(cm_rf_tuned_train$overall["Accuracy"]),
+  'Test Accuracy'     = as.numeric(cm_rf_tuned_test$overall["Accuracy"]),
+  Kappa             = as.numeric(cm_rf_tuned_test$overall["Kappa"]),
+  Sensitivity       = as.numeric(cm_rf_tuned_test$byClass["Sensitivity"]),
+  Specificity       = as.numeric(cm_rf_tuned_test$byClass["Specificity"]),
+  'Balanced Accuracy' = as.numeric(cm_rf_tuned_test$byClass["Balanced Accuracy"])
+)
+
+# Table for tuned random forest
+kable(stats_rf_tuned, digits = 3,
+      caption = "\\textbf{Performance Metrics for Tuned Random Forest}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+############################################################
+# Model Performance of All Models
+############################################################
+
+model_performance <- rbind(
+  Logistic_Regression = stats_logit,
+  Decision_Tree       = stats_tree,
+  Random_Forest       = stats_rf,
+  Random_Forest_Tuned = stats_rf_tuned
+)
+
+kable(model_performance, digits = 3,
+      caption = "\\textbf{Performance Metrics Comparison}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+
+############################################################
+# Global Interpretation
+############################################################
+
+# Variable Importance
+importance_df <- importance(rf_model_tuned) %>%
+  as.data.frame()
+
+importance_df$Variable <- rownames(importance_df)
+
+importance_df <- importance_df %>%
+  arrange(desc(MeanDecreaseGini))
+
+# Variable Importance Plot
+ggplot(
+  importance_df[1:10, ],
+  aes(x = reorder(Variable, MeanDecreaseGini),
+      y = MeanDecreaseGini)
+) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Figure 6: Top 10 Variable Importance – Random Forest",
+    x = "",
+    y = "Mean Decrease in Gini"
+  ) +
+  theme_minimal()+
+  theme(
+  plot.title   = element_text(size = 9, face = "bold"),
+  axis.title   = element_text(size = 7),
+  axis.text    = element_text(size = 7),
+  legend.title = element_text(size = 9),
+  legend.text  = element_text(size = 7)
+)
+
+# Partial Dependence Plots for Top 2 Variables
+
+#PDP for Revenue
+pdp_revenue <- partial(
+  object = rf_model,
+  pred.var = "Revenue",
+  train = train_data,
+  which.class = "High",
+  prob = TRUE,
+  grid.resolution = 30,
+  plot = FALSE,
+  parallel = FALSE  
+)
+
+p1 <- ggplot(pdp_revenue, aes(x = Revenue, y = yhat)) +
+  geom_area(alpha = 0.15, fill = "steelblue") +
+  geom_line(size = 1, color = "steelblue") +
+  labs(
+    title = "Figure 7: Partial Dependence of Revenue",
+    x = "Revenue",
+    y = "Predicted P(High ESG)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+  theme(
+  plot.title   = element_text(size = 9),
+  axis.title   = element_text(size = 7),
+  axis.text    = element_text(size = 7),
+  legend.title = element_text(size = 9),
+  legend.text  = element_text(size = 7)
+)
+
+# Region bar plot 
+rf_test_prob_high <- predict(rf_model_tuned, newdata = test_data, type = "prob")[, "High"]
+
+region_effect <- test_data %>%
+  mutate(P_High = rf_test_prob_high) %>%
+  group_by(Region) %>%
+  summarise(
+    avg_prob_high = mean(P_High, na.rm = TRUE),
+    n = n(),
+    .groups = "drop"
+  )
+
+p2 <- ggplot(region_effect, aes(x = reorder(Region, avg_prob_high), y = avg_prob_high)) +
+  geom_col(fill = "steelblue", alpha = 0.9) +
+  coord_flip() +
+  scale_y_continuous(labels = scales::percent_format(accuracy = 1)) +
+  labs(
+    title = "Figure 8: Average Predicted by Region",
+    x = "Region",
+    y = "Average Predicted P(High ESG)"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", hjust = 0.5),
+    panel.grid.minor = element_blank()
+  ) +
+ theme(
+  plot.title   = element_text(size = 9),
+  axis.title   = element_text(size = 7),
+  axis.text    = element_text(size = 7),
+  legend.title = element_text(size = 9),
+  legend.text  = element_text(size = 7)
+)
+
+
+# Side-by-side layout
+(p1 | p2)
+
+############################################################
+# Local Interpretation
+############################################################
+
+set.seed(123)
+
+
+# Define model_type and predict_model for randomForest
+model_type.randomForest <- function(x, ...) {
+  "classification"
+}
+
+predict_model.randomForest <- function(x, newdata, ...) {
+  preds <- predict(x, newdata = newdata, type = "prob")
+  as.data.frame(preds)
+}
+
+# Build LIME explainer on training predictors
+
+x_train <- train_data %>% select(-ESG_Class)
+
+rf_explainer <- lime(
+  x = x_train,
+  model = rf_model_tuned
+)
+
+# Pick one confident High and one confident Low example
+
+rf_test_prob  <- predict(rf_model_tuned, newdata = test_data, type = "prob")
+rf_test_class <- predict(rf_model_tuned, newdata = test_data, type = "class")
+
+test_with_pred <- test_data %>%
+  mutate(
+    Predicted = rf_test_class,
+    P_High    = rf_test_prob[, "High"]
+  )
+
+# Most confident predicted High
+obs_high <- test_with_pred %>%
+  filter(Predicted == "High") %>%
+  arrange(desc(P_High)) %>%
+  slice(1)
+
+# Most confident predicted Low
+obs_low <- test_with_pred %>%
+  filter(Predicted == "Low") %>%
+  arrange(P_High) %>%
+  slice(1)
+
+
+# Explain both observations with LIME
+
+explain_one <- function(one_row, case_label) {
+  lime::explain(
+    x = one_row %>% select(-ESG_Class, -Predicted, -P_High),
+    explainer = rf_explainer,
+    labels = "High",          # explain probability of "High" ESG
+    n_features = 6,
+    n_permutations = 1000,
+    kernel_width = 0.75
+  ) %>%
+    mutate(case = case_label)
+}
+
+exp_high <- explain_one(obs_high, "Example predicted High ESG")
+exp_low  <- explain_one(obs_low,  "Example predicted Low ESG")
+
+# Plot local explanations 
+#high
+plot_features(exp_high) +
+  labs(title = "Figure 9: Local explanation - High ESG example") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      size = 9,
+      face = "bold",
+      hjust = 0.5   
+    ),
+    axis.title = element_text(size = 7, face = "plain"),
+    axis.text  = element_text(size = 7, face = "plain")
+  )
+
+#low
+plot_features(exp_low) +
+  labs(title = "Figure 10: Local explanation - Low ESG example") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      size = 9,
+      face = "bold",
+      hjust = 0.5   
+    ),
+    axis.title = element_text(size = 7, face = "plain"),
+    axis.text  = element_text(size = 7, face = "plain")
+  )
+
+```
+
+\newpage 
+# Introduction
+This paper examines companies' different sustainability characteristics using hierarchical clustering and predicts ESG (Environmental, Social, and Governance) scores using three different models: logistic regression, decision trees, and random forests. In recent years, ESG scores have become influential in investing as these scores show a company's dedication to ethical and sustainable practices (@friede2015esg). For this reason, understanding the relationship between a company's environmental practices and its ESG score is important for investors and regulators, as responsible business is often considered smart business.
+
+ESG scores exist to give a simple overview of a business's sustainability performance, but they may hide some variations in environmental performance (@berg2020esg). Grouping firms based on environmental variables like energy, water, and carbon emissions allows for the identification of different sustainability profiles (@delmas2013). This is achieved by applying multiple models and finding patterns in the data to interpret the distinct ESG scores.
+
+The key research questions that this paper seeks to answer are whether environmental indicators can be used to classify companies into different sustainability profiles. Additionally, it investigates whether these profiles, along with other financial metrics in the dataset, can effectively predict whether a company has a high or low ESG score. By answering these questions, the study aims to provide insights into the relationship between environmental performance and ESG ratings, which will give regulators and investors a greater knowledge, helping them make better decisions.
+
+To address these questions, the analysis combines both unsupervised and supervised machine learning approaches. First, firms with similar environmental characteristics are grouped using hierarchical clustering. Next, environmental and financial factors are used in classification models to predict ESG performance. Lastly, we interpret the final model to obtain a better perspective of what factors influence the different ESG predictions.
+
+# Data
+
+The analysis uses a synthetic ESG and financial dataset that includes 1000 organizations across different industries and geographies from 2015 to 2025. Although the data is simulated, it was created to reflect realistic patterns commonly observed, making it relevant to this paper and very suitable for the analysis without compromising confidentiality.
+
+Each firm is observed annually, keeping track of their ESG scores, environmental indicators (carbon emissions, water usage, energy consumption), and financial metrics (revenue, profit margin, growth rate, market capitalization). Overall ESG performance is captured by an aggregate ESG score ranging from 0 to 100, which is further divided into environmental, social, and governance individual scores.
+
+The environmental indicators are important in this study because these variables are linked to businesses' operational activities rather than subjective analysis. Clustering algorithms are used to identify sustainability profiles based on these characteristics. Then, the supervised learning models combine financial and categorical firm variables, such as industry, region, and year, to predict different ESG performance levels.
+
+
+# Methodology
+
+Before starting with the models, it is very important to prepare the data. The data was cleaned by removing the identifier variables (CompanyID and CompanyName) and converting categorical variables (industry, region, and year) into factors. Also, the variable GrowthRate had 1,000 missing values, which we filled in using the median value to keep the full sample size. Furthermore, data visualization showed that several numeric variables were highly skewed to the right. To address this, we log-transformed MarketCap, CarbonEmissions, WaterUsage, and EnergyConsumption to reduce scale dominance and improve numerical stability in the models. Revenue was kept in its original scale because it showed only moderate skewness. Additionally, we created a binary target variable called ESG_Class to classify companies as having either a "High" or "Low" ESG score based on whether the total ESG score was above or below the median. We scaled the environmental variables only for the cluster analysis to ensure equal contribution in the distance calculations. For the supervised learning models, variables were kept on their original or log-transformed scales, since logistic regression and tree-based models are not sensitive to variable scaling. Finally, we split the dataset into training (70%) and test (30%) sets in order to estimate and assess the models.
+
+To identify distinct sustainability profiles based on environmental performance, hierarchical clustering was performed using Ward's and Euclidean distance method on the scaled environmental indicators to produce compact and interpretable clusters. Euclidean distance was chosen as it works well with continuous variables, and Ward's method minimizes within-cluster variance, leading to more uniform groups. The dendrogram showed three different groups, which were labeled as "Sustainable," "Moderate impact," and "High impact" based on their average environmental profiles. The "Sustainable" cluster exhibited the lowest average carbon emissions, water usage, and energy consumption, while the "High impact" cluster showed the highest levels across these indicators.
+
+Logistic regression was first used as a baseline classifier to model the probability that a company achieves a high ESG score. This offered a basic measure by which more complex machine learning models could be evaluated. A decision tree classifier was then estimated to capture nonlinear relationships between predictors. Decision trees offer a transparent structure, illustrating how different variables contribute to ESG classification through a sequence of decision rules (@breiman1984cart). Tree complexity was controlled using cost complexity pruning, ensuring an interpretable decision tree and to prevent overfitting.
+
+A random forest classifier was used to improve predictive performance even more. By aggregating predictions across many trees, the model reduces variance and improves generalization compared to a single decision tree (@breiman2001). This characteristic makes random forests appropriate for ESG classification, where nonlinear effects and interactions between financial and environmental variables are expected. To assess robustness, both an untuned and a lightly tuned version of the random forest were taken into consideration. Tuning focused on key hyperparameters that control model complexity and randomness, specially the number of predictors considered at each split. This parameter, which is essential to the bias–variance trade-off in random forests, allows the model to balance the strength of individual trees with the diversity of the ensemble. The number of trees was set sufficiently high to ensure stable predictions. Since random forests are typically robust and the goal was to evaluate model stability rather than enhance performance through aggressive tuning, extensive hyperparameter modification was avoided.
+
+Model performance was evaluated using accuracy, sensitivity, specificity, balanced accuracy, and Cohen’s kappa. Balanced accuracy was shown to account for potential class imbalance between high and low ESG firms. Confusion matrices were also used with heatmaps to examine classification errors in more detail. 
+
+Global model interpretation was conducted using variable importance measures from the random forest model. In addition, partial dependence plots were used to examine the effect of key continuous predictors on the probability of high ESG performance. For categorical predictors, group level predicted probabilities were compared to identify differences across regions. To complement the global analysis, local interpretation was performed using LIME (Local Interpretable Model-agnostic Explanations) (@ribeiro2016lime). Two representative observations, one classified as high ESG and one as low ESG, were selected to illustrate how individual predictions are influenced by a small subset of characteristics. This provides insight into how global patterns can be translated into more specific company-level decisions.
+
+# Analysis & Results
+## Environmental Sustainability Slusters
+The hierarchical clustering results indicate that there are three distinct sustainability profiles. The first cluster is formed by companies with lower carbon emissions, less water usage, and less energy consumption, being a more environmentally sustainable group. The second cluster shows moderate levels across all indicators, indicating a higher environmental impact than Cluster 1. Lastly, the third cluster displays substantially higher environmental impact, characterized by companies that have a negative impact on the environment.
+
+Figure 1 displays the different clusters specified above, with the log-transformed water usage and carbon emissions. The graph has many points, each represents an individual company, and the different colors are associated with different clusters. One can almost see a line with all the firms close to each other, showing a positive relationship between the water usage and carbon emissions. Companies are separated into three distinct groups differentiated by different colors. These represent low, moderate, and high environmental impact, indicating that the clustering captures important variation in environmental performance rather than random noise.
+
+Figure 2 illustrates the average environmental profiles of the three clusters. The sustainable cluster is associated with the lowest water usage and carbon emissions, while the high-impact cluster shows markedly higher values on both measures. The moderate-impact cluster is located in the middle of the graph. Overall, this graph provides insight into the average profile of each cluster, summarizing their environmental performance in a simple illustration.
+
+Both figures, presented below, show that different companies can actually be grouped into different sustainability profiles based on different characteristics, providing a useful starting point for further ESG prediction research.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+# Combine plots
+final_plot <- (plot_1 | plot_2) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+final_plot
+
+```
+
+Table 1 complements Figures 1 and 2 by summarizing the average environmental variables and environmental ESG scores in numbers. Related to the patterns observed in Figure 2, Cluster 1 shows the lowest levels of carbon emissions (113,515), water usage (77,850), and energy consumption (284,848), and consequently has the highest environmental ESG score (81.6). Cluster 2 is formed by companies with a moderate environmental footprint, exhibiting higher resource use than Cluster 1 and as expected, a lower ESG score (45.0). By contrast, Cluster 3 displays extremely high environmental impact, with average carbon emissions over 11.6 million, water usage above 3.7 million, and energy consumption surpassing 118 million, getting the lowest environmental ESG score (34.1).
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+# Cluster Profiles
+df %>%
+  group_by(Cluster) %>%
+  summarise(
+    `Carbon Emissions`        = mean(CarbonEmissions, na.rm = TRUE),
+    `Water Usage`             = mean(WaterUsage, na.rm = TRUE),
+    `Energy Consumption`      = mean(EnergyConsumption, na.rm = TRUE),
+    `Environmental ESG Score` = mean(ESG_Environmental, na.rm = TRUE)
+  ) %>%
+  ungroup() %>%
+  kable(
+    format = "latex",
+    booktabs = TRUE,
+    digits = 1,
+    align = c("l", "r", "r", "r", "r"),
+    caption = "\\textbf{Environmental Sustainability Cluster Profiles}"
+  ) %>%
+  kable_styling(
+    full_width = FALSE,
+    position = "center",
+    latex_options = c("hold_position")
+  ) 
+```
+
+## ESG classification models
+The analysis started with a simpler model, such as the logistic regression, to use as a baseline. This way, we can better evaluate how well a simple linear decision boundary can predict ESG classifications. As shown in Table 2, the model performs very poorly, with both test accuracy and balanced accuracy around 0.27, which is below what would be expected from random guessing. The other numbers support that the model’s predictions show little agreement with the observed ESG classes beyond random. In addition, the low sensitivity (0.258) and specificity (0.272) reveal that the model struggles to correctly identify any ESG score. This weak predictive ability can also be seen by its confusion matrix, which contains a large number of misclassified observations. Overall, these results emphasize the limitations of a linear model and motivate the use of more flexible, non-linear models.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+kable(stats_logit, digits = 3,
+      caption = "\\textbf{Performance Metrics for Logistic Regression}")%>%
+ 
+   kable_styling(full_width = FALSE, position = "center")
+```
+
+
+To move beyond the limitations of a linear model, a decision tree classifier was modeled to capture potential non-linear relationships and interaction effects between the variables. Figure 3 shows the pruned decision tree used to classify firms into high and low ESG categories. The first and most influential split is based on the region or geographic location. Firms that are located in Europe, North America, and Oceania have a more balanced mix of high and low ESG classifications (43% vs. 57%), while firms found in other regions are usually classified with a low ESG score. Also, in the other regions, industry association also separates companies into different ESG outcomes, pointing out the relation between regional and sector-specific characteristics. Several terminal nodes exhibit elevated class probabilities, thereby indicating the existence of clearly separated sustainability profiles. In sum, the decision tree provides an accessible perspective on the collective influence of firm characteristics on ESG classification, serving as a valuable intermediary between the simple logistic regression model and the more adaptable random forest methodology.
+
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=11, fig.height=6}
+# Visualize Tree
+
+rpart.plot(
+  tree_model,
+  type = 2,
+  extra = 104,
+  fallen.leaves = TRUE,
+  main = "Figure 3: Decision Tree for ESG Classification",
+  cex.main = 1.10,   
+  split.cex = 0.9)
+
+```
+
+The decision tree classifier had better results compared to the logistic regression model, achieving a test accuracy of roughly 73% and a similar balanced accuracy, as detailed in Table 3. Sensitivity (0.762) and specificity (0.694) imply that the model has a good capacity to accurately classify both high and low ESG firms. This balanced performance profile suggests that the observed results are not influenced by class imbalance.
+
+The confusion matrix supports this enhancement, revealing a greater percentage of accurately classified observations for each ESG category compared to the initial model. Although the decision tree does not achieve the same level of predictive accuracy as the random forest, it provides an intuitive structure that makes it easier to understand how different variables contribute to ESG classification.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+kable(stats_tree, digits = 3,
+      caption = "\\textbf{Performance Metrics for Descision Tree}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+
+A random forest classifier was implemented to further improve predictive performance of the decision tree through variance reduction and the capture of more complex patterns. While the decision tree is easy to interpret, its performance can vary substantially depending on the specific sample used to build the tree. By averaging predictions across many trees trained on different bootstrap samples and subsets of predictors, the random forest produces more stable and generalizable results.
+
+Table 4 demonstrates that the random forest model achieved the highest performance relative to all other models, with a test and a balanced accuracy of 84%. In contrast to the decision tree, the random forest significantly enhanced both overall accuracy and Cohen’s Kappa, thereby indicating the model's capacity to outperform random classification. Despite attaining perfect accuracy on the training data, the test-set performance remained consistent, implying minimal overfitting.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+kable(stats_rf, digits = 3,
+      caption = "\\textbf{Performance Metrics for Random Forest}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+
+A lightly tuned version of the random forest gave similar results (Table 5), with only minimal differences in test accuracy, balanced accuracy, and Cohen’s Kappa. Figures 4 and 5 further confirm this similarity: the confusion matrices show almost the same distribution of correct classifications and errors across both classes, indicating that tuning does not meaningfully change the model’s error profile. As the tuned version gave slightly better results, it was then retained as the final model for further interpretation. Overall, the random forest provides a robust and well-performing classifier, offering a strong balance between predictive accuracy and generalization among the considered approaches.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+kable(stats_rf_tuned, digits = 3,
+      caption = "\\textbf{Performance Metrics for Tuned Random Forest}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+```
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.7, fig.height=2.6}
+
+p_rf + p_rf_tuned
+
+```
+
+
+## Model performance comparison
+Table 6 provides a nice overview of all supervised learning models considered in this study. To summarize, the logistic regression performs poorly across all metrics, indicating that linear decision boundaries are insufficient to capture the complexity of ESG classification. The decision tree represents a substantial improvement, offering both higher predictive accuracy and interpretable decision rules, particularly with respect to regional and industry-level characteristics.
+
+The random forest achieves the strongest overall performance, consistently outperforming the decision tree in terms of accuracy, balanced accuracy, and agreement between predicted and observed ESG classes. While tuning the random forest leads to only marginal performance differences, the results remain stable across specifications. These findings point to a clear trade-off between interpretability and predictive accuracy, leading to the selection of the random forest as the primary model for subsequent global and local interpretation.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE}
+
+kable(model_performance, digits = 3,
+      caption = "\\textbf{Performance Metrics Comparison}") %>%
+  kable_styling(full_width = FALSE, position = "center")
+
+```
+
+## Model interpretation
+Below, Figure 6 reports the top ten predictors in the random forest model. Region is the most important variable by a big margin, indicating that ESG classification is strongly influenced by the geographic location. Revenue and profitability are also very influential, followed by environmental measures such as energy, water, and carbon emissions. Overall, the variable importance results suggest that ESG outcomes reflect a combination of contextual factors and firm-level financial and environmental characteristics, rather than being influenced by a single variable. 
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.5, fig.height=2.5}
+# Variable Importance Plot
+ggplot(
+  importance_df[1:10, ],
+  aes(x = reorder(Variable, MeanDecreaseGini),
+      y = MeanDecreaseGini)
+) +
+  geom_col(fill = "steelblue") +
+  coord_flip() +
+  labs(
+    title = "Figure 6: Top 10 Variable Importance – Random Forest",
+    x = "",
+    y = "Mean Decrease in Gini"
+  ) +
+  theme_minimal()+
+  theme(
+  plot.title   = element_text(size = 9, face = "bold"),
+  axis.title   = element_text(size = 7),
+  axis.text    = element_text(size = 7),
+  legend.title = element_text(size = 9),
+  legend.text  = element_text(size = 7)
+)
+
+```
+
+Following the variable importance results, Figures 7 and 8 provide further insight into how the most influential predictors shape ESG classification. Figure 7 shows the partial dependence of revenue on the probability of high ESG performance. The relationship is positive but clearly nonlinear: increases in revenue are associated with substantial gains in predicted ESG probability at lower revenue levels, while the effect gradually levels off for larger firms. This pattern suggests diminishing marginal effects of firm size, indicating that beyond a certain scale, additional revenue contributes relatively little to improvements in ESG classification.
+
+Figure 8 illustrates average predicted probabilities of high ESG classification across regions. Regional differences are noticable, with firms located in Europe, Oceania, and North America exhibiting substantially higher predicted ESG probabilities than in the other locations. Together, these figures show that ESG classification is influenced by both firm size and more general institutional and geographic factors, supporting the earlier clustering and decision tree results. These differences continue even after adjusting for firm-level financial and environmental characteristics, illustrating the significance of regional context in ESG outcomes.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.5, fig.height=2.5}
+
+# Side-by-side layout
+(p1 | p2)
+
+```
+
+To complement the global interpretation, local explanations were generated using LIME for two representative test observations: one classified as High ESG with high confidence and one classified as Low ESG.
+
+Figure 9 illustrates the local explanation for an observation predicted as High ESG with a probability of 0.99. The prediction is driven primarily by contextual and environmental factors. Location in North America is the strongest positive contributor, followed by relatively low carbon emissions, energy consumption, and water usage, all of which increase the predicted probability of high ESG performance. Industry affiliation in technology and a higher market capitalization further reinforce the classification. Importantly, all influential features act in the same direction, and no strong contradicting factors are present, indicating a coherent and internally consistent prediction.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.5, fig.height=3}
+plot_features(exp_high) +
+  labs(title = "Figure 9: Local explanation - High ESG example") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      size = 9,
+      face = "bold",
+      hjust = 0.5   
+    ),
+    axis.title = element_text(size = 7, face = "plain"),
+    axis.text  = element_text(size = 7, face = "plain")
+  )
+
+
+```
+
+Figure 10 presents the local explanation for an observation predicted as Low ESG. In this case, the prediction is dominated by several strong negative contributors. Firms located in the Middle East and those with lower revenue show the strongest negative impact on the probability of being classified as high ESG, followed by industry affiliation in transportation. While some environmental indicators contribute weakly in favor of a higher ESG outcome, their effect is dominated by contextual and financial factors that lead to a Low ESG prediction. This comparison shows how the random forest combines environmental information with regional and industry characteristics for individual companies.
+
+```{r echo=FALSE, warning=FALSE, message=FALSE, fig.width=6.5, fig.height=3}
+plot_features(exp_low) +
+  labs(title = "Figure 10: Local explanation - Low ESG example") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(
+      size = 9,
+      face = "bold",
+      hjust = 0.5   
+    ),
+    axis.title = element_text(size = 7, face = "plain"),
+    axis.text  = element_text(size = 7, face = "plain")
+  )
+
+```
+
+Overall, the local explanations confirm that the model’s predictions are not driven only by a single variable, but by the interaction of environmental performance, firm characteristics, and geographic context. These particular insights align closely with the global importance and partial dependence results, strengthening confidence in the interpretability and credibility of the model’s decision process.
+
+# Conclusion
+
+In conclusion, the objective of this paper was to determine whether environmental and financial variables and can be used to classify companies into different sustainability profiles. The analysis actually provides evidence after running several models (hierarchical clustering, logistic regression, decision trees, and random forests) that environmental and contextual factors play a central role in explaining ESG performance.
+
+After running the hierarchical clustering, we observe that there are 3 different clusters characterized by low, moderate, and high environmental impact. Companies with lower emissions and lower resource usage consistently achieved higher environmental ESG scores. These findings suggest that ESG scores reflect underlying environmental behavior rather than random variation.
+
+After estimating the supervised learning models it is visible that the logistic regression performs poorly, as it cannot capture the complex relationships in the data. Decision trees improve predictive performance while offering interpretable decision rules, whereas the random forest model achieves the highest predictive accuracy and balanced performance. At the end, global and local interpretation support that firm size and regional context systematically influence ESG predictions, and that these relationships can be translated to company-level classification decisions.
+
+Also we have to take into consideration that there are some limitations. One of them is that the dataset used is simulated and not based on real companies information, which limits how applicable the results are to real world ESG evaluations. Another limitation is that the binary classification of ESG performance simplifies a very complex concept in which other factors influence this, hiding important variations within ESG categories. Finally, the analysis focuses on predictive associations and does not establish causal relationships between environmental performance and ESG outcomes, meaning that the analysis cannot determine whether environmental performance directly causes higher ESG scores or whether both are driven by other factors.
+
+Some future research that could complement and expand this study to make it better could be to actually work on real ESG datasets that uses other different variables that could influence the different performance scores. Also, it would be interesting to explore causal inference approaches to see how firm behavior actually influences ESG ratings. However, this study is still relevant and the findings show us that machine learning method can be a very useful tool to identify sustainability profiles and finding different patterns to predict ESG performance.
+
+
+\newpage 
+# References
+
+
